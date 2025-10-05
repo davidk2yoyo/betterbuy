@@ -1,5 +1,99 @@
 console.log("✅ BetterBuy content script loaded on:", window.location.href);
 
+// Currency and country detection helpers
+const CURRENCY_MAP = {
+  '.mx': { code: 'MXN', symbol: 'MXN $', flag: '🇲🇽', country: 'Mexico' },
+  '.com.mx': { code: 'MXN', symbol: 'MXN $', flag: '🇲🇽', country: 'Mexico' },
+  '.com': { code: 'USD', symbol: '$', flag: '🇺🇸', country: 'USA' },
+  '.ca': { code: 'CAD', symbol: 'CAD $', flag: '🇨🇦', country: 'Canada' },
+  '.co.uk': { code: 'GBP', symbol: '£', flag: '🇬🇧', country: 'UK' },
+  '.uk': { code: 'GBP', symbol: '£', flag: '🇬🇧', country: 'UK' },
+  '.de': { code: 'EUR', symbol: '€', flag: '🇩🇪', country: 'Germany' },
+  '.fr': { code: 'EUR', symbol: '€', flag: '🇫🇷', country: 'France' },
+  '.es': { code: 'EUR', symbol: '€', flag: '🇪🇸', country: 'Spain' },
+  '.it': { code: 'EUR', symbol: '€', flag: '🇮🇹', country: 'Italy' },
+  '.jp': { code: 'JPY', symbol: '¥', flag: '🇯🇵', country: 'Japan' },
+  '.au': { code: 'AUD', symbol: 'AUD $', flag: '🇦🇺', country: 'Australia' },
+  '.br': { code: 'BRL', symbol: 'R$', flag: '🇧🇷', country: 'Brazil' }
+};
+
+// Exchange rates cache (updates daily)
+let exchangeRates = null;
+let ratesLastFetched = null;
+
+// Detect currency from URL
+function detectCurrency(url) {
+  try {
+    const hostname = new URL(url).hostname;
+
+    // Check for domain matches
+    for (const [domain, info] of Object.entries(CURRENCY_MAP)) {
+      if (hostname.endsWith(domain)) {
+        return info;
+      }
+    }
+
+    // Default to USD
+    return CURRENCY_MAP['.com'];
+  } catch (e) {
+    return CURRENCY_MAP['.com'];
+  }
+}
+
+// Fetch exchange rates (free API, no key needed)
+async function getExchangeRates() {
+  const ONE_DAY = 24 * 60 * 60 * 1000;
+
+  // Check cache
+  if (exchangeRates && ratesLastFetched && (Date.now() - ratesLastFetched < ONE_DAY)) {
+    return exchangeRates;
+  }
+
+  try {
+    const response = await fetch('https://api.exchangerate-api.com/v4/latest/USD');
+    const data = await response.json();
+    exchangeRates = data.rates;
+    ratesLastFetched = Date.now();
+    return exchangeRates;
+  } catch (error) {
+    console.log("Could not fetch exchange rates, using fallback");
+    // Fallback rates (approximate)
+    return {
+      USD: 1,
+      MXN: 18,
+      CAD: 1.35,
+      GBP: 0.79,
+      EUR: 0.92,
+      JPY: 149,
+      AUD: 1.52,
+      BRL: 4.95
+    };
+  }
+}
+
+// Convert price to USD
+async function convertToUSD(priceString, currencyCode) {
+  // Extract numeric value from price string
+  const numericPrice = parseFloat(priceString.replace(/[^0-9.]/g, ''));
+
+  if (isNaN(numericPrice)) {
+    return null;
+  }
+
+  if (currencyCode === 'USD') {
+    return numericPrice;
+  }
+
+  const rates = await getExchangeRates();
+  const rate = rates[currencyCode];
+
+  if (!rate) {
+    return null;
+  }
+
+  return numericPrice / rate;
+}
+
 // Create floating BetterBuy button
 const btn = document.createElement("img");
 btn.id = "betterbuy-btn";
@@ -168,7 +262,27 @@ async function extractProductInfo() {
     }
   }
 
-  return { name, price, description, image, url, timestamp: Date.now() };
+  // Detect currency and country
+  const currencyInfo = detectCurrency(url);
+
+  // Convert price to USD
+  let priceUSD = null;
+  if (price !== "N/A") {
+    priceUSD = await convertToUSD(price, currencyInfo.code);
+  }
+
+  return {
+    name,
+    price,
+    priceUSD,
+    currency: currencyInfo.code,
+    currencySymbol: currencyInfo.symbol,
+    countryFlag: currencyInfo.flag,
+    description,
+    image,
+    url,
+    timestamp: Date.now()
+  };
 }
 
 // Handle Add to Cart with AI summarization
@@ -183,10 +297,40 @@ async function addProductToCart() {
   try {
     const product = await extractProductInfo();
 
-    // Try to summarize description using Gemini Nano
+    // Try to detect language, translate, and summarize description using Gemini Nano
     if (product.description && product.description.length > 50) {
       try {
-        // Check if Summarizer API is available
+        let textToSummarize = product.description;
+
+        // Step 1: Detect language
+        if ('LanguageDetector' in self) {
+          const detector = await LanguageDetector.create();
+          const results = await detector.detect(product.description);
+
+          if (results && results.length > 0) {
+            const topLanguage = results[0].detectedLanguage;
+            console.log(`✅ Detected language: ${topLanguage} (confidence: ${results[0].confidence})`);
+
+            // Step 2: Translate to English if needed
+            if (topLanguage !== 'en' && results[0].confidence > 0.5) {
+              if ('Translator' in self) {
+                try {
+                  const translator = await Translator.create({
+                    sourceLanguage: topLanguage,
+                    targetLanguage: 'en'
+                  });
+                  textToSummarize = await translator.translate(product.description);
+                  console.log("✅ Description translated to English");
+                  translator.destroy();
+                } catch (transErr) {
+                  console.log("Translation not available, using original text");
+                }
+              }
+            }
+          }
+        }
+
+        // Step 3: Summarize (now in English)
         if ('Summarizer' in self) {
           const availability = await Summarizer.availability();
           if (availability === 'readily') {
@@ -196,14 +340,14 @@ async function addProductToCart() {
               format: 'plain-text',
               length: 'short'
             });
-            const summarized = await summarizer.summarize(product.description);
+            const summarized = await summarizer.summarize(textToSummarize);
             product.description = summarized;
             summarizer.destroy();
             console.log("✅ Description summarized with AI");
           }
         }
       } catch (err) {
-        console.log("Summarizer not available, using original description");
+        console.log("AI processing not available, using original description", err);
       }
     }
 

@@ -65,6 +65,17 @@ function createProductCard(product) {
   // Extract store name from URL
   const storeName = extractStoreName(product.url);
 
+  // Format price display with currency conversion
+  let priceDisplay = product.price;
+  if (product.priceUSD && product.currency !== 'USD') {
+    priceDisplay = `
+      <div class="price-original">${product.currency} ${product.price} ${product.countryFlag || ''}</div>
+      <div class="price-converted">≈ USD $${product.priceUSD.toFixed(2)}</div>
+    `;
+  } else if (product.countryFlag) {
+    priceDisplay = `${product.countryFlag} ${product.price}`;
+  }
+
   card.innerHTML = `
     <img src="${imageUrl}" alt="${product.name}" class="product-image" onerror="this.src='icons/icon128.png'">
     <div class="product-content">
@@ -72,8 +83,8 @@ function createProductCard(product) {
         <input type="checkbox" class="product-checkbox" data-id="${product.id}" ${selectedProducts.has(product.id) ? 'checked' : ''}>
         <h3 class="product-title">${product.name}</h3>
       </div>
-      <span class="store-badge">${storeName}</span>
-      <div class="product-price">${product.price}</div>
+      <span class="store-badge">${product.countryFlag || ''} ${storeName}</span>
+      <div class="product-price">${priceDisplay}</div>
       <p class="product-description">${product.description || 'No description available'}</p>
       <div class="product-footer">
         <button class="btn btn-small btn-visit" data-url="${product.url}">
@@ -198,13 +209,21 @@ async function runAIComparison() {
       throw new Error("AI not available");
     }
 
-    // Create prompt for comparison
+    // Create prompt for comparison with USD prices for fair comparison
     const productsInfo = selectedItems.map((p, i) => {
+      let priceInfo;
+      if (p.priceUSD && p.currency !== 'USD') {
+        priceInfo = `USD $${p.priceUSD.toFixed(2)} (original: ${p.currency} ${p.price})`;
+      } else if (p.priceUSD) {
+        priceInfo = `USD $${p.priceUSD.toFixed(2)}`;
+      } else {
+        priceInfo = p.price;
+      }
+
       return `Product ${i + 1}:
 Name: ${p.name}
-Price: ${p.price}
-Description: ${p.description || 'N/A'}
-URL: ${p.url}`;
+Price: ${priceInfo}
+Description: ${p.description || 'N/A'}`;
     }).join("\n\n");
 
     const prompt = `You are a helpful shopping assistant. Compare these products and provide a recommendation on which one offers the best value.
@@ -213,7 +232,7 @@ ${productsInfo}
 
 Please provide:
 1. A brief comparison of key features
-2. Price analysis
+2. Price analysis (all prices are already converted to USD for fair comparison)
 3. Your recommendation and why
 4. Any important considerations
 
